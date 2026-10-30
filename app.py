@@ -21,6 +21,7 @@ from plotly.subplots import make_subplots
 from scipy import stats as sps
 
 import data_processing as dp
+import qa_engine as qa
 from trend_compare import compare_trends, verdict
 from stats_analysis import (
     cagr, chow_test_event, detect_breakpoint_auto, linear_trend,
@@ -63,6 +64,14 @@ st.markdown(f"""
  .warn-box {{ background:#fff8ec; border-left:4px solid #E8A33D; border-radius:6px; padding:.6rem 1rem;
     margin:.5rem 0 1rem 0; font-size:.9rem; color:#5a4200; }}
  .mini-title {{ font-size:.95rem; font-weight:600; color:{ACCENT}; margin-bottom:.2rem; }}
+ section[data-testid="stSidebar"] .qa-ex button {{ justify-content:flex-start; text-align:left; padding:0; min-height:0; }}
+ section[data-testid="stSidebar"] .st-key-qa_examples button {{ justify-content:flex-start; text-align:left;
+    padding:.05rem 0; min-height:0; border:none; background:transparent; }}
+ section[data-testid="stSidebar"] .st-key-qa_examples button p {{ font-style:italic; color:{PRIMARY}; font-size:.84rem;
+    text-align:left; }}
+ section[data-testid="stSidebar"] .st-key-qa_examples button:hover p {{ text-decoration:underline; }}
+ .qa-chip {{ display:inline-block; background:#eef3f9; border:1px solid #d5e0ec; color:{ACCENT}; border-radius:12px;
+    padding:.1rem .6rem; margin:0 .3rem .3rem 0; font-size:.8rem; }}
 </style>""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
@@ -103,6 +112,55 @@ def measure_unit(m: str) -> str:
 # Panel de control
 # ---------------------------------------------------------------------------
 st.sidebar.markdown("## ⚙️ Panel de control")
+
+# --- Pregunta a los datos ---------------------------------------------------
+for _k, _v in {"qa_text": "", "qa_go": None, "qa_ai_cache": {}}.items():
+    ss.setdefault(_k, _v)
+
+
+def _qa_submit():
+    ss["qa_go"] = ss["qa_text"].strip() or None
+
+
+def _qa_example(q: str):
+    ss["qa_text"] = q
+    ss["qa_go"] = q
+
+
+def _qa_clear():
+    ss["qa_text"] = ""
+    ss["qa_go"] = None
+
+
+_TERTIARY = {"type": "tertiary"} if _st_version() >= (1, 42) else {}
+with st.sidebar.expander("💬 Pregunta a los datos", expanded=True):
+    qa_use_filters = st.toggle("Aplicar los filtros del panel", value=True, key="qa_use_filters",
+                               help="Activado: responde sobre la selección actual (fechas, decisión, áreas, alto costo, "
+                                    "búsqueda de DCI). Desactivado: responde sobre toda la base del CFT.")
+    st.text_area("Pregunta", key="qa_text", label_visibility="collapsed", height=80,
+                 placeholder="Ej.: ¿qué principios activos explican más evaluaciones en 2025?")
+    qb1, qb2 = st.columns(2)
+    qb1.button("Consultar", type="primary", on_click=_qa_submit, key="qa_btn_go", **STRETCH)
+    qb2.button("Limpiar", on_click=_qa_clear, key="qa_btn_clear", **STRETCH)
+    st.caption("Ejemplos de preguntas (tócalos para consultar)")
+    with st.container(key="qa_examples"):
+        for _i, _q in enumerate(qa.EXAMPLES):
+            st.button(_q, key=f"qa_ex_{_i}", on_click=_qa_example, args=(_q,), **_TERTIARY)
+    QA_KEY = qa.get_api_key(st.secrets) if hasattr(st, "secrets") else None
+    QA_AI_ON = bool(ss.get("qa_ai_on")) and bool(QA_KEY or ss.get("qa_key_input"))
+    st.caption(("✨ Modo IA activo." if QA_AI_ON else "🌙 Modo básico por reglas.")
+               + " Las cifras salen de agregaciones sobre los datos del observatorio; al modelo solo se envían tablas "
+                 "resumidas, sin identificadores.")
+    with st.popover("Activar modo IA", **STRETCH) if hasattr(st, "popover") else st.expander("Activar modo IA"):
+        st.toggle("Usar modo IA (Claude)", key="qa_ai_on",
+                  help="Redacta la respuesta con un modelo de Claude a partir de tablas resumidas (por año, área, "
+                       "principio activo y alto costo). No se envían N.º de evaluación ni registros individuales.")
+        st.selectbox("Modelo", qa.AI_MODELS, key="qa_ai_model")
+        if QA_KEY:
+            st.caption("🔑 Clave de API tomada de los *secrets* de la app.")
+        else:
+            st.text_input("Clave de API de Anthropic", type="password", key="qa_key_input",
+                          help="Solo se guarda en esta sesión. Para despliegues, define ANTHROPIC_API_KEY en los secrets.")
 
 with st.sidebar.expander("📐 Serie y medida", expanded=True):
     freq_label = st.selectbox("Granularidad", list(dp.FREQ_LABELS), index=0, key="freq_label")
@@ -217,6 +275,71 @@ st.markdown(f"""<div class="app-header"><div class="ico">💊</div><div>
             unsafe_allow_html=True)
 st.caption(f"**Selección actual:** {len(DF):,} de {len(CFT):,} evaluaciones · {freq_label.lower()} · {measure_label} · "
            f"{lo_d:%d-%m-%Y} a {hi_d:%d-%m-%Y}")
+
+
+# ---------------------------------------------------------------------------
+# Respuesta a «Pregunta a los datos»
+# ---------------------------------------------------------------------------
+def render_qa() -> None:
+    q = ss.get("qa_go")
+    if not q:
+        return
+    base = DF if qa_use_filters else CFT
+    with st.container(border=True):
+        h1, h2 = st.columns([0.76, 0.24], vertical_alignment="center") if _st_version() >= (1, 36) else st.columns([0.76, 0.24])
+        h1.markdown(f"#### 💬 {q}")
+        _ico = {"icon": ":material/close:"} if _st_version() >= (1, 37) else {}
+        h2.button("Cerrar" if _ico else "✕ Cerrar", key="qa_close", on_click=_qa_clear, help="Cerrar la respuesta",
+                  **_ico, **STRETCH)
+        if base.empty:
+            st.warning("Los filtros del panel no dejan evaluaciones. Desactiva «Aplicar los filtros del panel».")
+            return
+        ans = qa.answer(q, base, HC, NAMES, ALIAS, INC_MONTHS, PAL)
+        scope = (f"selección del panel ({len(base):,} evaluaciones)" if qa_use_filters
+                 else f"toda la base ({len(base):,} evaluaciones)")
+        chips = "".join(f'<span class="qa-chip">{c}</span>' for c in ans.understood)
+        st.markdown(f'<div style="margin-bottom:.4rem"><span class="qa-chip">Base: {scope}</span>{chips}</div>',
+                    unsafe_allow_html=True)
+        key = ss.get("qa_key_input") or QA_KEY
+        if QA_AI_ON and key:
+            sig = (q, scope, ss.get("qa_ai_model"), DATA_SIG, len(base), str(base["fecha"].min()), str(base["fecha"].max()))
+            cache = ss["qa_ai_cache"]
+            if sig not in cache:
+                with st.spinner("Consultando al modelo…"):
+                    try:
+                        ctx = qa.ai_context(base, HC, NAMES, INC_MONTHS, ans)
+                        cache[sig] = ("ok", qa.ask_ai(q, ctx, key, ss.get("qa_ai_model") or qa.AI_MODELS[0]))
+                    except Exception as e:  # noqa: BLE001
+                        cache[sig] = ("err", str(e))
+            kind, txt = cache[sig]
+            if kind == "ok":
+                html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", txt).replace("\n", "<br>")
+                st.markdown(f'<div class="interp-box">✨ <b>Respuesta (modo IA)</b><br>{html}</div>', unsafe_allow_html=True)
+            else:
+                st.warning(f"No se pudo usar el modo IA ({txt}). Se muestra la respuesta por reglas.")
+        if not ans.ok:
+            st.info(ans.text)
+            return
+        st.markdown(f"**{ans.title}.** {ans.text}")
+        for w in ans.warnings:
+            st.markdown(f'<div class="warn-box">⚠ {w}</div>', unsafe_allow_html=True)
+        if ans.fig is not None:
+            n_rows = len(ans.table) if ans.table is not None else 8
+            horiz = any(getattr(tr, "orientation", None) == "h" for tr in ans.fig.data)
+            hh = max(300, min(26 * n_rows + 90, 620)) if horiz else 380
+            ans.fig.update_layout(height=hh, margin=dict(l=10, r=30, t=20, b=10), template="plotly_white",
+                                  legend=dict(orientation="h", y=-0.2), font=dict(size=12))
+            st.plotly_chart(ans.fig, key="qa_fig", **STRETCH)
+        if ans.table is not None:
+            with st.expander("Tabla de la respuesta", expanded=ans.fig is None):
+                st.dataframe(ans.table, hide_index=True, **STRETCH)
+                st.download_button("⬇️ Descargar CSV", ans.table.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name="respuesta_cft.csv", mime="text/csv", key="qa_dl")
+    st.markdown("---")
+
+
+render_qa()
+
 if DF.empty:
     st.warning("Los filtros no dejan ninguna evaluación. Ajusta el panel lateral.")
     st.stop()
@@ -1641,4 +1764,58 @@ with t_data:
 
 st.markdown("---")
 st.caption("Fuente: listados de medicamentos evaluados por el Comité Farmacoterapéutico y listado no PNUME de alto costo — INEN. "
-           "Elaboración propia. Estructura y métodos adaptados del Observatorio del Financiamiento Oncológico INEN.")
+           "Elaboración propia.")
+
+# ---------------------------------------------------------------------------
+# Autoría y cita
+# ---------------------------------------------------------------------------
+APP_URL = "https://mlobservatorio-cft-inen.streamlit.app/"   # <- reemplazar por la URL definitiva del despliegue
+CITE_YEAR = 2026
+TITLE_ES = "Observatorio del Comité Farmacoterapéutico INEN: Requerimientos y Aprobaciones en el Tiempo"
+TITLE_EN = "INEN Pharmacy and Therapeutics Committee Observatory: Requests and Approvals Over Time"
+PUB_ES, PUB_EN = "Instituto Nacional de Enfermedades Neoplásicas", "National Institute of Neoplastic Diseases"
+
+st.markdown(f"""
+<div style="text-align:center; color:#6b7280; font-size:.85rem; margin:1.2rem 0 1.4rem 0;">
+© Luis A. Orrego Ferreyros, Econ., MCE, MMD, PhD(c), CQRM · Epidemiólogo y Economista de la Salud — INEN</div>
+<div style="background:#f7f8fb; border:1px solid #e2e6ee; border-radius:8px; padding:1rem 1.2rem; font-size:.8rem; color:#333;">
+<p style="font-weight:700; color:{ACCENT}; font-size:.75rem; letter-spacing:.02em; margin:0 0 .6rem 0;">REFERENCIA WEB (formato AMA)</p>
+<p style="margin:0 0 .9rem 0;">Orrego-Ferreyros LA. {TITLE_ES}. {PUB_ES}. Published {CITE_YEAR}. Accessed [Mes Día, Año]. {APP_URL}</p>
+<p style="font-weight:700; color:{ACCENT}; font-size:.75rem; letter-spacing:.02em; margin:0 0 .6rem 0;">WEB REFERENCE (AMA format)</p>
+<p style="margin:0;">Orrego-Ferreyros LA. {TITLE_EN}. {PUB_EN}. Published {CITE_YEAR}. Accessed [Month Day, Year]. {APP_URL}</p>
+</div>""", unsafe_allow_html=True)
+
+_today = pd.Timestamp.today()
+BIB = f"""@misc{{orregoferreyros{CITE_YEAR}cft,
+  author       = {{Orrego-Ferreyros, Luis Alexander}},
+  title        = {{{TITLE_ES}}},
+  howpublished = {{\\url{{{APP_URL}}}}},
+  organization = {{{PUB_ES}}},
+  year         = {{{CITE_YEAR}}},
+  note         = {{Accedido el {_today:%d/%m/%Y}}}
+}}
+"""
+ENW = f"""<?xml version="1.0" encoding="UTF-8"?>
+<xml><records><record>
+<ref-type name="Web Page">12</ref-type>
+<contributors><authors><author>Orrego-Ferreyros, Luis Alexander</author></authors></contributors>
+<titles><title>{TITLE_ES}</title></titles>
+<publisher>{PUB_ES}</publisher>
+<dates><year>{CITE_YEAR}</year></dates>
+<urls><related-urls><url>{APP_URL}</url></related-urls></urls>
+<access-date>{_today:%Y-%m-%d}</access-date>
+</record></records></xml>
+"""
+RIS = f"""TY  - ELEC
+AU  - Orrego-Ferreyros, Luis Alexander
+TI  - {TITLE_ES}
+PB  - {PUB_ES}
+PY  - {CITE_YEAR}
+UR  - {APP_URL}
+Y2  - {_today:%Y/%m/%d}
+ER  - 
+"""
+f1, f2, f3 = st.columns(3)
+f1.download_button("⬇️ BibTeX (*.bib)", BIB.encode("utf-8"), "observatorio_cft_inen.bib", "application/x-bibtex", key="cite_bib")
+f2.download_button("⬇️ EndNote XML (*.xml)", ENW.encode("utf-8"), "observatorio_cft_inen.xml", "application/xml", key="cite_enw")
+f3.download_button("⬇️ RIS (*.ris)", RIS.encode("utf-8"), "observatorio_cft_inen.ris", "application/x-research-info-systems", key="cite_ris")

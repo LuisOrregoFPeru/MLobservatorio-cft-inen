@@ -11,6 +11,19 @@ streamlit run app.py
 ```
 Despliegue en Streamlit Community Cloud: subir **todos** los archivos del repositorio (incluida `data/`) y usar `app.py` como módulo principal.
 
+## 💬 Pregunta a los datos (panel lateral)
+Escribe una pregunta en español o toca un ejemplo. La respuesta aparece bajo la cabecera con una frase, gráfico, tabla
+descargable, los filtros que se entendieron (chips) y avisos de cobertura incompleta.
+- **Modo básico por reglas** (`qa_engine.py`): reconoce años o rangos («entre 2023 y 2025», «desde 2024»), decisión,
+  alto costo, tratamiento oncológico (2025+), áreas, grupos, principios activos por nombre, Top N, medidas
+  (evaluaciones, % de aprobación, primera vez, principios activos distintos, precio de referencia) y desgloses por año,
+  trimestre, mes, área, grupo, decisión o principio activo.
+- **Aplicar los filtros del panel**: activado responde sobre la selección actual; desactivado, sobre toda la base.
+- **Modo IA (opcional)**: redacta la respuesta con Claude a partir de tablas resumidas (año × decisión, áreas, top 40
+  principios activos, alto costo con precio, resultado por reglas). No se envían N.º de evaluación ni registros
+  individuales. Requiere `ANTHROPIC_API_KEY` en `.streamlit/secrets.toml` / secrets de Streamlit Cloud, o pegar la clave
+  en la sesión.
+
 ## Pestañas
 | Pestaña | Qué hace |
 |---|---|
