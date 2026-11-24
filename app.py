@@ -21,6 +21,7 @@ from plotly.subplots import make_subplots
 from scipy import stats as sps
 
 import data_processing as dp
+import ets_link as el
 import qa_engine as qa
 from trend_compare import compare_trends, verdict
 from stats_analysis import (
@@ -653,8 +654,9 @@ if kpi_warn:
                + ": el valor observado de ese año subestima su total (2021 sin diciembre; 2022 hasta el 10-sep; 2026 hasta el 2-sep).")
 
 tabs = st.tabs(["📈 Serie temporal", "📅 Comparación anual", "💊 Alto costo", "✂️ Punto de corte", "🌿 Tendencia",
-                "🔮 Proyección", "🔬 Qué explica el crecimiento", "🔀 Serie externa", "📋 Tabla y descarga", "🗂️ Datos"])
-(t_series, t_year, t_hc, t_break, t_trend, t_proj, t_rank, t_ext, t_table, t_data) = tabs
+                "🔮 Proyección", "🔬 Qué explica el crecimiento", "🧾 ETS (INS)", "🔀 Serie externa", "📋 Tabla y descarga",
+                "🗂️ Datos"])
+(t_series, t_year, t_hc, t_break, t_trend, t_proj, t_rank, t_ets, t_ext, t_table, t_data) = tabs
 
 # ============================== 1. SERIE TEMPORAL ============================
 with t_series:
@@ -1546,6 +1548,324 @@ with t_rank:
         st.dataframe(dd, hide_index=True, **STRETCH, column_config={"Fecha": st.column_config.DateColumn(format="DD-MM-YYYY")})
         note(f"En {ysel} se evaluaron por primera vez {len(dd)} principios activos ({int((dd['Alto costo (listado)'] != '').sum())} del listado de alto costo). "
              "Revisa esta lista para ver qué áreas y qué tipo de fármacos están entrando al CFT.")
+
+# ============================== ETS DEL INS =================================
+with t_ets:
+    st.subheader("🧾 ETS del INS y decisiones del CFT")
+    st.caption("Cruza los informes de Evaluación de Tecnologías Sanitarias (ETS) publicados por el INS con las solicitudes "
+               "evaluadas por el CFT del INEN, por principio activo. Pregunta: ¿cambian las solicitudes y las decisiones del "
+               "CFT después de que se publica una ETS?")
+    if "ets" not in ss:
+        try:
+            ss["ets"] = el.load_ets()
+        except Exception as e:  # noqa: BLE001
+            ss["ets"] = None
+            st.error(f"No se pudo leer data/ets_informes.csv: {e}")
+    ETS = ss["ets"]
+    if ETS is None or ETS.empty:
+        st.info("Carga la base de informes ETS en el expansor de abajo.")
+    else:
+        c_a, c_b, c_c, c_d = st.columns([1.2, 1.3, 1.2, 1.3])
+        e_win = c_a.slider("Ventana antes/después (meses)", 3, 24, 12, 1, key="ets_win")
+        e_unit = c_b.radio("Unidad del análisis antes/después", ["Primera ETS observable de cada molécula", "Cada informe ETS"],
+                           key="ets_unit", help="Con «Cada informe», una molécula con varias ETS cuenta sus evaluaciones "
+                                                 "varias veces (p. ej. pembrolizumab). La primera ETS observable (con meses suficientes "
+                                                 "a ambos lados) evita ese doble conteo.")
+        e_comb = c_c.checkbox("Incluir moléculas en combinación", value=False, key="ets_comb",
+                              help="Además de la molécula principal de la intervención (p. ej. binimetinib en "
+                                   "«encorafenib más binimetinib»).")
+        e_inen = c_c.checkbox("Solo ETS solicitadas por el CFT INEN", value=False, key="ets_inen")
+        e_panel = c_d.checkbox("Aplicar los filtros del panel", value=False, key="ets_panel",
+                               help="Desactivado: usa toda la base del CFT (recomendado; filtrar por decisión "
+                                    "invalidaría el % de aprobación).")
+        e_minexp = c_d.slider("Meses observados mínimos a cada lado", 1, 24, min(6, e_win), 1, key="ets_minexp")
+        areas_ets = sorted(ETS["area"].unique())
+        e_areas = st.multiselect("Área de la ETS (vacío = todas)", areas_ets, default=[], key="ets_areas")
+
+        E = ETS[ETS["tipo_tec"].eq("Medicamento")]
+        if e_areas:
+            E = E[E["area"].isin(e_areas)]
+        if e_inen:
+            E = E[E["solic_inen"]]
+        LK = el.link_table(E)
+        if not e_comb:
+            LK = LK[LK["rol"] == "Principal"]
+        CB = el.tag_cft(DF if e_panel else CFT)
+        OKM = el.valid_months(CFT, INC_MONTHS)
+        PALL = el.event_pairs(LK, E, CB, e_win, OKM)
+        if PALL.empty:
+            st.info("Ningún informe ETS con molécula identificada para esta selección.")
+        else:
+            PM = PALL[PALL["cft_total"] > 0]
+            CB["ets_previa"] = el.prior_ets_status(CB, LK, E)
+
+            k1_, k2_, k3_, k4_, k5_ = st.columns(5)
+            k1_.metric("Informes ETS de medicamentos", fmt_int(len(E)),
+                       f"{E['fecha_pub'].min():%Y}–{E['fecha_pub'].max():%Y}", delta_color="off")
+            k2_.metric("Con molécula evaluada en el CFT", fmt_int(PM["id"].nunique()),
+                       f"{PM['clave'].nunique()} principios activos", delta_color="off")
+            k3_.metric("Solicitadas por el CFT INEN", fmt_int(int(E["solic_inen"].sum())))
+            n_prev = int((CB["ets_previa"] != "Sin ETS previa").sum())
+            k4_.metric("Evaluaciones del CFT con ETS previa", fmt_int(n_prev),
+                       f"{n_prev / max(len(CB), 1) * 100:.1f}% del total", delta_color="off")
+            post_contra = CB[CB["ets_previa"] == "En contra"]
+            k5_.metric("Aprobadas tras una ETS en contra", f"{(post_contra['decision'] == 'APROBADO').mean() * 100:.0f}%"
+                       if len(post_contra) else "n/d", f"{len(post_contra)} evaluaciones", delta_color="off")
+
+            # --- A. Solicitudes con ETS previa por año ----------------------
+            st.markdown("#### ¿Cuántas solicitudes del CFT llegan con una ETS previa?")
+            a_mode = st.radio("Mostrar", ["N.º de evaluaciones", "% del año"], horizontal=True, key="ets_a_mode")
+            ct = pd.crosstab(CB["anio"], CB["ets_previa"])
+            order = [c for c in ["A favor", "Mixta", "En contra", "Sin recomendación formal", "Sin ETS previa"] if c in ct.columns]
+            ct = ct[order]
+            ctv = ct.div(ct.sum(axis=1), axis=0) * 100 if a_mode.startswith("%") else ct
+            figA = go.Figure()
+            for c in order:
+                figA.add_bar(x=ctv.index.astype(str), y=ctv[c], name=c, marker_color=el.DICT_COLORS[c],
+                             hovertemplate=f"{c}<br>%{{x}}: %{{y:,.1f}}<extra></extra>")
+            figA.update_layout(barmode="stack")
+            style_fig(figA, 380, "% del año" if a_mode.startswith("%") else "N.º de evaluaciones")
+            st.plotly_chart(figA, **STRETCH)
+            sh = (ct.drop(columns="Sin ETS previa", errors="ignore").sum(axis=1) / ct.sum(axis=1) * 100)
+            yr_max = int(sh.idxmax()) if len(sh) else None
+            note("Cada evaluación del CFT se clasifica según el dictamen de la ETS más reciente del INS sobre esa molécula "
+                 "publicada **antes** de la fecha de evaluación. "
+                 + (f"La proporción con ETS previa pasa de {sh.iloc[0]:.0f}% en {sh.index[0]} a {sh.iloc[-1]:.0f}% en "
+                    f"{sh.index[-1]} (máximo {sh.max():.0f}% en {yr_max}). " if len(sh) >= 2 else "")
+                 + "Las ETS de 2019–2023 son en su mayoría síntesis de evidencia sin recomendación; las ETS-EMC con dictamen "
+                   "a favor o en contra se concentran desde 2024. La ETS evalúa una indicación concreta (PICO) y el CFT una "
+                   "solicitud del principio activo, así que el cruce es por molécula, no por indicación.")
+
+            # --- B. Línea de tiempo --------------------------------------------
+            st.markdown("#### Línea de tiempo por molécula: evaluaciones del CFT y publicaciones ETS")
+            mol_rank = PM.groupby("molecula")["cft_total"].max().sort_values(ascending=False)
+            b1, b2 = st.columns([3, 1])
+            mol_sel = b1.multiselect("Moléculas", list(mol_rank.index), default=list(mol_rank.index[:15]), key="ets_mols")
+            only_obs = b2.checkbox("Solo ETS dentro del período del CFT", value=True, key="ets_only_obs")
+            if mol_sel:
+                keys_sel = PM.loc[PM["molecula"].isin(mol_sel), "clave"].unique()
+                ylab = {k: el.NAMES[k] for k in keys_sel}
+                ord_y = [m for m in mol_rank.index if m in mol_sel][::-1]
+                figB = go.Figure()
+                ev = CB[CB["ets_clave"].isin(keys_sel)].copy()
+                ev["mol"] = ev["ets_clave"].map(ylab)
+                for dec, sym, col in (("APROBADO", "circle", "#2C5F8A"), ("DENEGADO", "x", "#B5495B")):
+                    g = ev[ev["decision"] == dec]
+                    figB.add_scatter(x=g["fecha"], y=g["mol"], mode="markers", name=f"CFT {dec.lower()}",
+                                     marker=dict(symbol=sym, size=8 if dec == "APROBADO" else 11, color=col,
+                                                 opacity=.65 if dec == "APROBADO" else 1, line=dict(width=1, color="white")),
+                                     customdata=g[["n_evaluacion", "dci", "area_canon"]].values,
+                                     hovertemplate="%{customdata[0]} · %{x|%d-%m-%Y}<br>%{customdata[1]}<br>%{customdata[2]}<extra></extra>")
+                pe = PALL[PALL["clave"].isin(keys_sel)].copy()
+                if only_obs:
+                    pe = pe[pe["fecha_pub"] >= CFT["fecha"].min() - pd.DateOffset(months=6)]
+                for dg in el.DICT_ORDER:
+                    g = pe[pe["dict_grp"] == dg]
+                    if g.empty:
+                        continue
+                    figB.add_scatter(x=g["fecha_pub"], y=g["molecula"], mode="markers", name=f"ETS {dg.lower()}",
+                                     marker=dict(symbol="diamond", size=15, color=el.DICT_COLORS[dg],
+                                                 line=dict(width=1.5, color="#222")),
+                                     customdata=g[["codigo", "dictamen", "solicitante", "area_ets"]].values,
+                                     hovertemplate="<b>%{customdata[0]}</b> · %{x|%d-%m-%Y}<br>%{customdata[1]}<br>"
+                                                   "Solicitante: %{customdata[2]}<extra></extra>")
+                figB.update_yaxes(categoryorder="array", categoryarray=ord_y)
+                style_fig(figB, max(360, 34 * len(ord_y) + 120), "")
+                st.plotly_chart(figB, **STRETCH)
+                note("Cada fila es un principio activo. Los círculos son evaluaciones del CFT (las cruces, denegadas) y los "
+                     "rombos, publicaciones ETS coloreadas por dictamen; pasa el cursor para ver el código y quién la solicitó. "
+                     "Si los círculos siguen apareciendo con la misma densidad después de un rombo naranja, la ETS en contra "
+                     "no frenó las solicitudes de esa molécula en el INEN.")
+
+            # --- C. Antes / después ------------------------------------------
+            st.markdown(f"#### Antes y después de la publicación (±{e_win} meses)")
+            PO = PM[(PM["exp_pre"] >= e_minexp) & (PM["exp_post"] >= e_minexp)]
+            n_excl = len(PM) - len(PO)
+            PE = el.first_per_molecule(PO) if e_unit.startswith("Primera") else PO
+            if PE.empty:
+                st.info("Ningún par con suficientes meses observados a ambos lados. Reduce el mínimo o amplía la ventana.")
+            else:
+                rows = []
+                for dg in ["Todos"] + [d for d in el.DICT_ORDER if d in PE["dict_grp"].unique()]:
+                    g = PE if dg == "Todos" else PE[PE["dict_grp"] == dg]
+                    rr = el.rate_ratio(int(g["n_post"].sum()), float(g["exp_post"].sum()),
+                                       int(g["n_pre"].sum()), float(g["exp_pre"].sum()))
+                    rrr = el.relative_rr(int(g["n_post"].sum()), int(g["n_pre"].sum()),
+                                         int(g["ctrl_post"].sum()), int(g["ctrl_pre"].sum()))
+                    wil = np.nan
+                    d_ = (g["tasa_post"] - g["tasa_pre"]).dropna()
+                    if (d_ != 0).sum() >= 5:
+                        wil = sps.wilcoxon(d_[d_ != 0]).pvalue
+                    rows.append({"Dictamen": dg, "Pares": len(g), "Eval. antes": int(g["n_pre"].sum()),
+                                 "Eval. después": int(g["n_post"].sum()),
+                                 "Tasa antes (eval/año por molécula)": g["n_pre"].sum() / g["exp_pre"].sum() * 12,
+                                 "Tasa después": g["n_post"].sum() / g["exp_post"].sum() * 12,
+                                 "RR después/antes": rr["rr"], "IC95% RR": f"{rr['lo']:.2f}–{rr['hi']:.2f}" if np.isfinite(rr['lo']) else "n/d",
+                                 "p (Poisson exacta)": rr["p"],
+                                 "RR resto del CFT": (g["ctrl_post"].sum() / g["ctrl_pre"].sum()) if g["ctrl_pre"].sum() else np.nan,
+                                 "RR relativo": rrr["rrr"], "IC95% RR relativo": f"{rrr['lo']:.2f}–{rrr['hi']:.2f}" if np.isfinite(rrr['lo']) else "n/d",
+                                 "p Wilcoxon (pares)": wil})
+                RRT = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
+                RRT["IC95% RR"] = RRT["IC95% RR"].str.replace("inf", "∞")
+                st.dataframe(RRT, **STRETCH, hide_index=True, column_config={
+                    c: st.column_config.NumberColumn(format="%.2f") for c in
+                    ["Tasa antes (eval/año por molécula)", "Tasa después", "RR después/antes", "RR resto del CFT", "RR relativo"]}
+                    | {c: st.column_config.NumberColumn(format="%.3f") for c in ["p (Poisson exacta)", "p Wilcoxon (pares)"]})
+                tot = RRT.iloc[0]
+                con = RRT[RRT["Dictamen"] == "En contra"]
+                txt = (f"Se comparan las evaluaciones del CFT de cada molécula en los {e_win} meses previos y los {e_win} "
+                       f"posteriores a la ETS (el mes de publicación se excluye y solo cuentan los meses con cobertura completa). "
+                       f"En los **{int(tot['Pares'])} pares** analizados la tasa pasa de **{tot['Tasa antes (eval/año por molécula)']:.1f}** a "
+                       f"**{tot['Tasa después']:.1f}** evaluaciones por molécula y año (RR {tot['RR después/antes']:.2f}, IC95% {tot['IC95% RR']}). ")
+                if len(con):
+                    cr = con.iloc[0]
+                    txt += (f"Tras una ETS **en contra** el RR es {cr['RR después/antes']:.2f} ({cr['IC95% RR']}): "
+                            + ("las solicitudes no disminuyeron. " if cr["RR después/antes"] >= 1 else "las solicitudes disminuyeron. "))
+                txt += ("Como el CFT en conjunto también crece, el **RR relativo** divide el cambio de las moléculas con ETS entre "
+                        "el del resto de evaluaciones del CFT en las mismas ventanas: un valor cercano a 1 indica que el cambio "
+                        "acompaña la tendencia general y no se distingue un efecto propio de la ETS.")
+                if n_excl:
+                    txt += (f" Antes de elegir la unidad se descartan {n_excl} pares informe–molécula con menos de {e_minexp} "
+                            "meses observados a algún lado (p. ej. ETS anteriores a 2021 o de los últimos meses).")
+                note(txt)
+
+                ET = el.event_time(PE, CB, e_win, OKM)
+                c_l, c_r = st.columns(2)
+                with c_l:
+                    st.markdown('<div class="mini-title">Evaluaciones por molécula y mes relativo a la ETS</div>', unsafe_allow_html=True)
+                    sm = st.slider("Suavizado (media móvil, meses)", 1, 6, 3, key="ets_sm")
+                    figC = go.Figure()
+                    for dg in ["Todos"] + [d for d in el.DICT_ORDER if d in ET["dict_grp"].unique()]:
+                        g = ET if dg == "Todos" else ET[ET["dict_grp"] == dg]
+                        if g["par"].nunique() < 2 and dg != "Todos":
+                            continue
+                        s_ = g.groupby("rel")["n"].mean().reindex(range(-e_win, e_win + 1))
+                        s_ = s_.rolling(sm, center=True, min_periods=1).mean() if sm > 1 else s_
+                        figC.add_scatter(x=s_.index, y=s_.values, mode="lines", name=f"{dg} ({g['par'].nunique()})",
+                                         line=dict(color="#222" if dg == "Todos" else el.DICT_COLORS[dg],
+                                                   width=3 if dg == "Todos" else 2, dash="dash" if dg == "Todos" else None))
+                    figC.add_vline(x=0, line=dict(color="#888", dash="dot"))
+                    figC.update_xaxes(title="Meses desde la publicación de la ETS")
+                    style_fig(figC, 380, "Evaluaciones por molécula y mes")
+                    st.plotly_chart(figC, **STRETCH)
+                with c_r:
+                    st.markdown('<div class="mini-title">Tasa antes vs después por par (eval/año)</div>', unsafe_allow_html=True)
+                    figD = go.Figure()
+                    mx = float(np.nanmax([PE["tasa_pre"].max(), PE["tasa_post"].max(), 1])) * 1.08
+                    figD.add_scatter(x=[0, mx], y=[0, mx], mode="lines", line=dict(color="#aaa", dash="dot"),
+                                     name="Sin cambio", hoverinfo="skip")
+                    for dg in el.DICT_ORDER:
+                        g = PE[PE["dict_grp"] == dg]
+                        if g.empty:
+                            continue
+                        figD.add_scatter(x=g["tasa_pre"], y=g["tasa_post"], mode="markers", name=dg,
+                                         marker=dict(size=11, color=el.DICT_COLORS[dg], line=dict(width=1, color="white")),
+                                         customdata=g[["molecula", "codigo"]].values,
+                                         hovertemplate="%{customdata[0]}<br>%{customdata[1]}<br>antes %{x:.1f} · después %{y:.1f}<extra></extra>")
+                    figD.update_xaxes(title="Antes (eval/año)")
+                    style_fig(figD, 380 + 60, "Después (eval/año)")
+                    st.plotly_chart(figD, **STRETCH)
+                note("Izquierda: promedio de evaluaciones del CFT por molécula en cada mes alrededor de la publicación (0 = mes de "
+                     "la ETS; entre paréntesis, el número de pares). Derecha: cada punto es una molécula; sobre la diagonal, "
+                     "el CFT evaluó más solicitudes después de la ETS que antes. Son asociaciones temporales: una ETS suele "
+                     "publicarse cuando el fármaco ya está en uso creciente, por lo que no prueban efecto causal.")
+
+            # --- D. Decisiones del CFT después de la ETS ----------------------
+            st.markdown("#### Decisión del CFT según la ETS previa")
+            dtab = pd.crosstab(CB["ets_previa"], CB["decision"]).reindex(columns=["APROBADO", "DENEGADO"], fill_value=0)
+            dtab = dtab.reindex([c for c in ["A favor", "Mixta", "En contra", "Sin recomendación formal", "Sin ETS previa"]
+                                 if c in dtab.index])
+            dtab["Total"] = dtab.sum(axis=1)
+            dtab["% aprobado"] = dtab["APROBADO"] / dtab["Total"] * 100
+            st.dataframe(dtab.reset_index().rename(columns={"ets_previa": "ETS previa", "APROBADO": "Aprobado",
+                                                            "DENEGADO": "Denegado"}), **STRETCH, hide_index=True,
+                         column_config={"% aprobado": st.column_config.NumberColumn(format="%.1f%%")})
+            ftxt = ""
+            if "En contra" in dtab.index and "Sin ETS previa" in dtab.index:
+                a_, b_ = dtab.loc["En contra", ["APROBADO", "DENEGADO"]]
+                c_, d__ = dtab.loc["Sin ETS previa", ["APROBADO", "DENEGADO"]]
+                fp = sps.fisher_exact([[a_, b_], [c_, d__]]).pvalue
+                ftxt = (f"Tras una ETS en contra se aprobó el **{dtab.loc['En contra', '% aprobado']:.1f}%** de las solicitudes "
+                        f"frente a {dtab.loc['Sin ETS previa', '% aprobado']:.1f}% sin ETS previa (Fisher p={fp:.3f}). ")
+            note(ftxt + "El CFT deniega pocas solicitudes en general, así que esta comparación tiene poca potencia. Un dictamen "
+                 "en contra del INS no obliga al INEN; puede referirse a una indicación distinta de la que motivó la solicitud.")
+
+            # --- E. ETS solicitadas por el CFT INEN --------------------------
+            st.markdown("#### ETS solicitadas por el CFT del INEN")
+            PI = PALL[PALL["solic_inen"]].copy()
+            if PI.empty:
+                st.caption("No hay ETS solicitadas por el CFT INEN en la selección.")
+            else:
+                PI["Meses desde la 1.ª evaluación"] = PI["meses_desde_1a_cft"].round(1)
+                show = PI[["codigo", "fecha_pub", "molecula", "dictamen", "cft_antes", "cft_despues", "den_despues",
+                           "primera_cft", "ultima_cft", "Meses desde la 1.ª evaluación"]].rename(columns={
+                    "codigo": "Informe", "fecha_pub": "Publicación", "molecula": "Molécula", "dictamen": "Dictamen",
+                    "cft_antes": "Eval. CFT antes", "cft_despues": "Eval. CFT después", "den_despues": "Denegadas después",
+                    "primera_cft": "1.ª evaluación CFT", "ultima_cft": "Última evaluación CFT"})
+                st.dataframe(show.sort_values("Publicación"), **STRETCH, hide_index=True, column_config={
+                    c: st.column_config.DateColumn(format="DD-MM-YYYY") for c in ["Publicación", "1.ª evaluación CFT", "Última evaluación CFT"]})
+                n_con = int((PI["dict_grp"] == "En contra").sum())
+                n_cont = int(((PI["dict_grp"] == "En contra") & (PI["cft_despues"] > 0)).sum())
+                lag_med = PI["meses_desde_1a_cft"].median()
+                note(f"El CFT del INEN pidió {PI['id'].nunique()} ETS en la selección; {n_con} pares molécula–informe "
+                     f"resultaron en contra y en {n_cont} de ellos el CFT siguió evaluando la molécula después. "
+                     + (f"Mediana de {lag_med:.0f} meses entre la primera evaluación en el CFT y la publicación: la ETS llega "
+                        "cuando el fármaco ya se usa en el instituto. " if pd.notna(lag_med) else ""))
+
+            # --- F. Tabla completa ------------------------------------------
+            with st.expander("Tabla de vínculos ETS–CFT y descarga"):
+                cols_out = ["codigo", "tipo", "fecha_pub", "molecula", "rol", "dictamen", "dict_grp", "certeza", "area_ets",
+                            "solicitante", "cft_total", "cft_antes", "cft_despues", "den_antes", "den_despues",
+                            "n_pre", "n_post", "exp_pre", "exp_post", "tasa_pre", "tasa_post", "ctrl_pre", "ctrl_post",
+                            "primera_cft", "ultima_cft", "tecnologia", "pdf"]
+                OUT = PALL[cols_out].sort_values("fecha_pub", ascending=False)
+                st.dataframe(OUT, **STRETCH, hide_index=True, column_config={
+                    "pdf": st.column_config.LinkColumn("PDF", display_text="abrir"),
+                    "fecha_pub": st.column_config.DateColumn("Publicación", format="DD-MM-YYYY")})
+
+                def _ets_xlsx() -> bytes:
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+                        OUT.to_excel(xw, sheet_name="Vinculos ETS-CFT", index=False)
+                        if not PE.empty:
+                            RRT.to_excel(xw, sheet_name="Antes-despues", index=False)
+                        dtab.reset_index().to_excel(xw, sheet_name="Decision por ETS previa", index=False)
+                        CB[["fecha", "n_evaluacion", "dci", "area_canon", "decision", "ets_clave", "ets_previa"]].to_excel(
+                            xw, sheet_name="Evaluaciones CFT", index=False)
+                    return buf.getvalue()
+                x1, x2 = st.columns(2)
+                x1.download_button("⬇️ Excel (vínculos, antes/después, decisiones)", _ets_xlsx(), "CFT_ETS_INS.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", **STRETCH)
+                x2.download_button("⬇️ Vínculos (CSV)", OUT.to_csv(index=False).encode("utf-8-sig"), "CFT_ETS_vinculos.csv",
+                                   "text/csv", **STRETCH)
+                sinv = E[~E["id"].isin(PM["id"])][["codigo", "fecha_pub", "tecnologia", "dictamen_grupo", "solicitante"]]
+                st.caption(f"{len(sinv)} informes de medicamentos sin evaluaciones de su molécula en el CFT (o sin molécula "
+                           "reconocida en el léxico):")
+                st.dataframe(sinv, **STRETCH, hide_index=True, height=220)
+
+    with st.expander("Actualizar la base ETS y notas metodológicas"):
+        up_ets = st.file_uploader("CSV de informes ETS (columnas: codigo, tecnologia, fecha_pub, dictamen_grupo; "
+                                  "opcionales: tipo, area, tipo_tec, solicitante, dictamen, certeza, pdf)", type=["csv"], key="up_ets")
+        if up_ets is not None:
+            try:
+                new_e = el.load_ets(up_ets)
+                st.success(f"{len(new_e)} informes ({new_e['fecha_pub'].min():%d-%m-%Y} a {new_e['fecha_pub'].max():%d-%m-%Y}).")
+                if st.button("Usar esta base ETS", key="use_ets"):
+                    ss["ets"] = new_e
+                    st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"No se pudo procesar: {e}")
+        if ss.get("ets") is not None:
+            st.download_button("⬇️ Base ETS en uso (CSV)", ss["ets"].drop(columns=["dict_grp", "solic_inen"], errors="ignore")
+                               .to_csv(index=False).encode("utf-8-sig"), "ets_informes.csv", "text/csv")
+        st.markdown("""
+- **Fuente:** informes ETS, ETS-EMC y ETS-C publicados por el INS (CETS/SDETS) en gob.pe, con dictamen agrupado (a favor, en contra, mixta, sin recomendación formal).
+- **Vínculo por molécula:** léxico de patrones (`ets_link.py`). De cada informe se lee solo el tramo de la intervención, antes de «para / en / como / vs», para no tomar comparadores ni tratamientos previos de la población. La primera molécula es la principal; las siguientes, combinación (excluidas por defecto).
+- **Unidad:** la ETS evalúa una indicación (PICO); el CFT evalúa una solicitud del principio activo sin indicación registrada. El cruce no permite saber si la solicitud del CFT era para la misma indicación.
+- **Antes/después:** evaluaciones en los *k* meses previos y posteriores, sin el mes de publicación y solo en meses con cobertura completa (exposición en meses). RR con IC exacto condicional (binomial); **RR relativo** = RR de las moléculas con ETS ÷ RR del resto de evaluaciones del CFT en las mismas ventanas (IC log-normal). Con «Cada informe ETS», las ventanas de una misma molécula se solapan y los IC son optimistas.
+- **ETS previa:** dictamen de la ETS más reciente de la misma molécula publicada antes de la fecha de evaluación.
+- Resultados exploratorios; asociación temporal no implica causalidad.""")
+
 
 # ============================== 8. SERIE EXTERNA =============================
 def parse_external(raw: pd.DataFrame, date_col: str, val_col: str, agg: str, freq: str) -> pd.Series:

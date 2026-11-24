@@ -34,6 +34,7 @@ descargable, los filtros que se entendieron (chips) y avisos de cobertura incomp
 | 🌿 Tendencia | Mann-Kendall (Hamed-Rao/Yue-Wang), Sen y regresión lineal por serie; **comparación de tendencias entre 2 series** (igual que en Serie temporal) |
 | 🔮 Proyección | Holt amortiguado con bootstrap, 3 escenarios |
 | 🔬 Qué explica el crecimiento | Compara dos períodos y reparte el cambio entre fármacos, áreas o grupos (cascada); separa crecimiento por intensidad, diversificación y salidas; principios activos evaluados por 1.ª vez |
+| 🧾 ETS (INS) | Cruza los informes ETS/ETS-EMC del INS con las evaluaciones del CFT por molécula: % de solicitudes con ETS previa por año, línea de tiempo por molécula, antes/después de la publicación (RR con IC exacto y RR relativo frente al resto del CFT), decisión del CFT según el dictamen previo y ETS solicitadas por el CFT INEN |
 | 🔀 Serie externa | Sube otra serie (p. ej. gasto SIS/FISSAL) y compara: correlación y correlación cruzada con rezago |
 | 📋 Tabla y descarga | Excel, CSV y HTML del gráfico |
 | 🗂️ Datos | Carga de Excel nuevo del CFT y del listado de alto costo; alias; notas metodológicas |
@@ -42,6 +43,7 @@ descargable, los filtros que se entendieron (chips) y avisos de cobertura incomp
 - `cft_evaluaciones.csv` — 775 evaluaciones 2021–sep 2026, ya consolidadas (sin duplicados entre hojas, fechas corregidas).
 - `alto_costo.csv` — listado no PNUME de alto costo al 22/09/2026 (42 ítems, 39 principios activos).
 - `alias_alto_costo.csv` — cómo se vincula cada principio activo del listado con los DCI del CFT.
+- `ets_informes.csv` — 153 informes ETS del INS (2018–2026) con dictamen agrupado y solicitante; se vinculan con `ets_link.py`.
 - `eventos.csv` — eventos normativos precargados (del Observatorio del Financiamiento Oncológico).
 
 ## Actualizar
